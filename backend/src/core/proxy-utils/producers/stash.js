@@ -6,7 +6,6 @@ export default function Stash_Producer() {
         // https://stash.wiki/proxy-protocols/proxy-types#shadowsocks
         const list = proxies
             .filter((proxy) => {
-                if (opts['include-unsupported-proxy']) return true;
                 if (
                     ![
                         'ss',
@@ -40,6 +39,12 @@ export default function Stash_Producer() {
                             'xchacha20',
                             'chacha20-ietf-poly1305',
                             'xchacha20-ietf-poly1305',
+                            ...(opts['include-unsupported-proxy']
+                                ? [
+                                      '2022-blake3-aes-128-gcm',
+                                      '2022-blake3-aes-256-gcm',
+                                  ]
+                                : []),
                         ].includes(proxy.cipher)) ||
                     (proxy.type === 'snell' && String(proxy.version) === '4') ||
                     (proxy.type === 'vless' && proxy['reality-opts'])
@@ -272,9 +277,11 @@ export default function Stash_Producer() {
                 delete proxy.id;
                 delete proxy.resolved;
                 delete proxy['no-resolve'];
-                for (const key in proxy) {
-                    if (proxy[key] == null || /^_/i.test(key)) {
-                        delete proxy[key];
+                if (type !== 'internal') {
+                    for (const key in proxy) {
+                        if (proxy[key] == null || /^_/i.test(key)) {
+                            delete proxy[key];
+                        }
                     }
                 }
                 if (

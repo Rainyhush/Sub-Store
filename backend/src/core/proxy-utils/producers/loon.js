@@ -153,6 +153,14 @@ function trojan(proxy) {
 
     // sni
     result.appendIfPresent(`,tls-name=${proxy.sni}`, 'sni');
+    result.appendIfPresent(
+        `,tls-cert-sha256=${proxy['tls-fingerprint']}`,
+        'tls-fingerprint',
+    );
+    result.appendIfPresent(
+        `,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`,
+        'tls-pubkey-sha256',
+    );
 
     // tfo
     result.appendIfPresent(`,fast-open=${proxy.tfo}`, 'tfo');
@@ -215,6 +223,14 @@ function vmess(proxy) {
 
     // sni
     result.appendIfPresent(`,tls-name=${proxy.sni}`, 'sni');
+    result.appendIfPresent(
+        `,tls-cert-sha256=${proxy['tls-fingerprint']}`,
+        'tls-fingerprint',
+    );
+    result.appendIfPresent(
+        `,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`,
+        'tls-pubkey-sha256',
+    );
 
     // AEAD
     if (isPresent(proxy, 'aead')) {
@@ -286,6 +302,14 @@ function vless(proxy) {
 
     // sni
     result.appendIfPresent(`,tls-name=${proxy.sni}`, 'sni');
+    result.appendIfPresent(
+        `,tls-cert-sha256=${proxy['tls-fingerprint']}`,
+        'tls-fingerprint',
+    );
+    result.appendIfPresent(
+        `,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`,
+        'tls-pubkey-sha256',
+    );
 
     // tfo
     result.appendIfPresent(`,fast-open=${proxy.tfo}`, 'tfo');
@@ -338,6 +362,11 @@ function socks5(proxy) {
 
     // tfo
     result.appendIfPresent(`,tfo=${proxy.tfo}`, 'tfo');
+
+    // udp
+    if (proxy.udp) {
+        result.append(`,udp=true`);
+    }
 
     return result.toString();
 }
@@ -418,6 +447,14 @@ function hysteria2(proxy) {
 
     // sni
     result.appendIfPresent(`,tls-name=${proxy.sni}`, 'sni');
+    result.appendIfPresent(
+        `,tls-cert-sha256=${proxy['tls-fingerprint']}`,
+        'tls-fingerprint',
+    );
+    result.appendIfPresent(
+        `,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`,
+        'tls-pubkey-sha256',
+    );
     result.appendIfPresent(
         `,skip-cert-verify=${proxy['skip-cert-verify']}`,
         'skip-cert-verify',

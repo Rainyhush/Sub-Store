@@ -1,6 +1,6 @@
 import resourceCache from '@/utils/resource-cache';
 import scriptResourceCache from '@/utils/script-resource-cache';
-import { isIPv4, isIPv6 } from '@/utils';
+import { isIPv4, isIPv6, ipAddress } from '@/utils';
 import { FULL } from '@/utils/logical';
 import { getFlag, removeFlag } from '@/utils/geo';
 import { doh } from '@/utils/dns';
@@ -316,7 +316,7 @@ function RegexDeleteOperator(regex) {
  1. This function name should be `operator`!
  2. Always declare variables before using them!
  */
-function ScriptOperator(script, targetPlatform, $arguments, source) {
+function ScriptOperator(script, targetPlatform, $arguments, source, $options) {
     return {
         name: 'Script Operator',
         func: async (proxies) => {
@@ -326,6 +326,7 @@ function ScriptOperator(script, targetPlatform, $arguments, source) {
                     'operator',
                     script,
                     $arguments,
+                    $options,
                 );
                 output = operator(proxies, targetPlatform, { source, ...env });
             })();
@@ -338,9 +339,9 @@ function ScriptOperator(script, targetPlatform, $arguments, source) {
                     'operator',
                     `async function operator(input = []) {
                         if (input && (input.$files || input.$content)) {
-                            let { $content, $files } = input
+                            let { $content, $files, $options } = input
                             ${script}
-                            return { $content, $files }
+                            return { $content, $files, $options }
                         } else {
                             let proxies = input
                             let list = []
@@ -352,6 +353,7 @@ function ScriptOperator(script, targetPlatform, $arguments, source) {
                         }
                       }`,
                     $arguments,
+                    $options,
                 );
                 output = operator(proxies, targetPlatform, { source, ...env });
             })();
@@ -364,9 +366,6 @@ function parseIP4P(IP4P) {
     let server;
     let port;
     try {
-        if (!/^2001::[^:]+:[^:]+:[^:]+$/.test(IP4P)) {
-            throw new Error(`Invalid IP4P: ${IP4P}`);
-        }
         let array = IP4P.split(':');
 
         port = parseInt(array[2], 16);
@@ -395,18 +394,23 @@ const DOMAIN_RESOLVERS = {
         const id = hex_md5(`CUSTOM:${url}:${domain}:${type}`);
         const cached = resourceCache.get(id);
         if (!noCache && cached) return cached;
+        const answerType = type === 'IPv6' ? 'AAAA' : 'A';
         const res = await doh({
             url,
             domain,
-            type: type === 'IPv6' ? 'AAAA' : 'A',
+            type: answerType,
             timeout,
             edns,
         });
+
         const { answers } = res;
         if (!Array.isArray(answers) || answers.length === 0) {
             throw new Error('No answers');
         }
-        const result = answers.map((i) => i?.data).filter((i) => i);
+        const result = answers
+            .filter((i) => i?.type === answerType)
+            .map((i) => i?.data)
+            .filter((i) => i);
         if (result.length === 0) {
             throw new Error('No answers');
         }
@@ -417,26 +421,23 @@ const DOMAIN_RESOLVERS = {
         const id = hex_md5(`GOOGLE:${domain}:${type}`);
         const cached = resourceCache.get(id);
         if (!noCache && cached) return cached;
-        const resp = await $.http.get({
-            url: `https://8.8.4.4/resolve?name=${encodeURIComponent(
-                domain,
-            )}&type=${
-                type === 'IPv6' ? 'AAAA' : 'A'
-            }&edns_client_subnet=${edns}`,
-            headers: {
-                accept: 'application/dns-json',
-            },
+        const answerType = type === 'IPv6' ? 'AAAA' : 'A';
+        const res = await doh({
+            url: 'https://8.8.4.4/dns-query',
+            domain,
+            type: answerType,
             timeout,
+            edns,
         });
-        const body = JSON.parse(resp.body);
-        if (body['Status'] !== 0) {
-            throw new Error(`Status is ${body['Status']}`);
-        }
-        const answers = body['Answer'];
+
+        const { answers } = res;
         if (!Array.isArray(answers) || answers.length === 0) {
             throw new Error('No answers');
         }
-        const result = answers.map((i) => i?.data).filter((i) => i);
+        const result = answers
+            .filter((i) => i?.type === answerType)
+            .map((i) => i?.data)
+            .filter((i) => i);
         if (result.length === 0) {
             throw new Error('No answers');
         }
@@ -470,28 +471,27 @@ const DOMAIN_RESOLVERS = {
         resourceCache.set(id, result);
         return result;
     },
-    Cloudflare: async function (domain, type, noCache, timeout) {
+    Cloudflare: async function (domain, type, noCache, timeout, edns) {
         const id = hex_md5(`CLOUDFLARE:${domain}:${type}`);
         const cached = resourceCache.get(id);
         if (!noCache && cached) return cached;
-        const resp = await $.http.get({
-            url: `https://1.0.0.1/dns-query?name=${encodeURIComponent(
-                domain,
-            )}&type=${type === 'IPv6' ? 'AAAA' : 'A'}`,
-            headers: {
-                accept: 'application/dns-json',
-            },
+        const answerType = type === 'IPv6' ? 'AAAA' : 'A';
+        const res = await doh({
+            url: 'https://1.0.0.1/dns-query',
+            domain,
+            type: answerType,
             timeout,
+            edns,
         });
-        const body = JSON.parse(resp.body);
-        if (body['Status'] !== 0) {
-            throw new Error(`Status is ${body['Status']}`);
-        }
-        const answers = body['Answer'];
+
+        const { answers } = res;
         if (!Array.isArray(answers) || answers.length === 0) {
             throw new Error('No answers');
         }
-        const result = answers.map((i) => i?.data).filter((i) => i);
+        const result = answers
+            .filter((i) => i?.type === answerType)
+            .map((i) => i?.data)
+            .filter((i) => i);
         if (result.length === 0) {
             throw new Error('No answers');
         }
@@ -561,7 +561,7 @@ function ResolveDomainOperator({
         throw new Error(`域名解析服务提供方 ${provider} 不支持 ${_type}`);
     }
     const { defaultTimeout } = $.read(SETTINGS_KEY);
-    const requestTimeout = timeout || defaultTimeout;
+    const requestTimeout = timeout || defaultTimeout || 8000;
     let type = ['IPv6', 'IP4P'].includes(_type) ? 'IPv6' : 'IPv4';
 
     const resolver = DOMAIN_RESOLVERS[provider];
@@ -622,26 +622,44 @@ function ResolveDomainOperator({
                 if (!p['_no-resolve']) {
                     if (results[p.server]) {
                         p._resolved_ips = results[p.server];
-                        const ip = Array.isArray(results[p.server])
+                        let ip = Array.isArray(results[p.server])
                             ? results[p.server][
                                   Math.floor(
                                       Math.random() * results[p.server].length,
                                   )
                               ]
                             : results[p.server];
-                        if (_type === 'IP4P') {
-                            const { server, port } = parseIP4P(ip);
-                            if (server && port) {
+                        if (type === 'IPv6' && isIPv6(ip)) {
+                            try {
+                                ip = new ipAddress.Address6(ip).correctForm();
+                            } catch (e) {
+                                $.error(
+                                    `Failed to parse IPv6 address: ${ip}: ${e}`,
+                                );
+                            }
+                            if (/^2001::[^:]+:[^:]+:[^:]+$/.test(ip)) {
+                                p._IP4P = ip;
+                                const { server, port } = parseIP4P(ip);
+                                if (server && port) {
+                                    p._domain = p.server;
+                                    p.server = server;
+                                    p.port = port;
+                                    p.resolved = true;
+                                    p._IPv4 = p.server;
+                                    if (!isIP(p._IP)) {
+                                        p._IP = p.server;
+                                    }
+                                } else if (!p.resolved) {
+                                    p.resolved = false;
+                                }
+                            } else {
                                 p._domain = p.server;
-                                p.server = server;
-                                p.port = port;
+                                p.server = ip;
                                 p.resolved = true;
-                                p._IPv4 = p.server;
+                                p[`_${type}`] = p.server;
                                 if (!isIP(p._IP)) {
                                     p._IP = p.server;
                                 }
-                            } else {
-                                p.resolved = false;
                             }
                         } else {
                             p._domain = p.server;
@@ -652,7 +670,7 @@ function ResolveDomainOperator({
                                 p._IP = p.server;
                             }
                         }
-                    } else {
+                    } else if (!p.resolved) {
                         p.resolved = false;
                     }
                 }
@@ -774,7 +792,7 @@ function TypeFilter(types) {
  1. This function name should be `filter`!
  2. Always declare variables before using them!
  */
-function ScriptFilter(script, targetPlatform, $arguments, source) {
+function ScriptFilter(script, targetPlatform, $arguments, source, $options) {
     return {
         name: 'Script Filter',
         func: async (proxies) => {
@@ -784,6 +802,7 @@ function ScriptFilter(script, targetPlatform, $arguments, source) {
                     'filter',
                     script,
                     $arguments,
+                    $options,
                 );
                 output = filter(proxies, targetPlatform, { source, ...env });
             })();
@@ -806,6 +825,7 @@ function ScriptFilter(script, targetPlatform, $arguments, source) {
                         return list
                       }`,
                     $arguments,
+                    $options,
                 );
                 output = filter(proxies, targetPlatform, { source, ...env });
             })();
@@ -946,7 +966,7 @@ function clone(object) {
     return JSON.parse(JSON.stringify(object));
 }
 
-function createDynamicFunction(name, script, $arguments) {
+function createDynamicFunction(name, script, $arguments, $options) {
     const flowUtils = {
         getFlowField,
         getFlowHeaders,
@@ -958,6 +978,7 @@ function createDynamicFunction(name, script, $arguments) {
     if ($.env.isLoon) {
         return new Function(
             '$arguments',
+            '$options',
             '$substore',
             'lodash',
             '$persistentStore',
@@ -967,9 +988,11 @@ function createDynamicFunction(name, script, $arguments) {
             'scriptResourceCache',
             'flowUtils',
             'produceArtifact',
+            'require',
             `${script}\n return ${name}`,
         )(
             $arguments,
+            $options,
             $,
             lodash,
             // eslint-disable-next-line no-undef
@@ -982,26 +1005,30 @@ function createDynamicFunction(name, script, $arguments) {
             scriptResourceCache,
             flowUtils,
             produceArtifact,
+            eval(`typeof require !== "undefined"`) ? require : undefined,
         );
     } else {
         return new Function(
             '$arguments',
+            '$options',
             '$substore',
             'lodash',
             'ProxyUtils',
             'scriptResourceCache',
             'flowUtils',
             'produceArtifact',
-
+            'require',
             `${script}\n return ${name}`,
         )(
             $arguments,
+            $options,
             $,
             lodash,
             ProxyUtils,
             scriptResourceCache,
             flowUtils,
             produceArtifact,
+            eval(`typeof require !== "undefined"`) ? require : undefined,
         );
     }
 }

@@ -2,7 +2,15 @@ import { Buffer } from 'buffer';
 import rs from '@/utils/rs';
 import YAML from '@/utils/yaml';
 import download from '@/utils/download';
-import { isIPv4, isIPv6, isValidPortNumber, isNotBlank } from '@/utils';
+import {
+    isIPv4,
+    isIPv6,
+    isValidPortNumber,
+    isNotBlank,
+    ipAddress,
+    getRandomPort,
+    numberToString,
+} from '@/utils';
 import PROXY_PROCESSORS, { ApplyProcessor } from './processors';
 import PROXY_PREPROCESSORS from './preprocessors';
 import PROXY_PRODUCERS from './producers';
@@ -70,8 +78,24 @@ function parse(raw) {
     return proxies;
 }
 
-async function processFn(proxies, operators = [], targetPlatform, source) {
+async function processFn(
+    proxies,
+    operators = [],
+    targetPlatform,
+    source,
+    $options,
+) {
     for (const item of operators) {
+        if (item.disabled) {
+            $.log(
+                `Skipping disabled operator: "${
+                    item.type
+                }" with arguments:\n >>> ${
+                    JSON.stringify(item.args, null, 2) || 'None'
+                }`,
+            );
+            continue;
+        }
         // process script
         let script;
         let $arguments = {};
@@ -169,6 +193,7 @@ async function processFn(proxies, operators = [], targetPlatform, source) {
                 targetPlatform,
                 $arguments,
                 source,
+                $options,
             );
         } else {
             processor = PROXY_PROCESSORS[item.type](item.args || {});
@@ -195,8 +220,6 @@ function produce(proxies, targetPlatform, type, opts = {}) {
     );
 
     proxies = proxies.map((proxy) => {
-        proxy._subName = proxy.subName;
-        proxy._collectionName = proxy.collectionName;
         proxy._resolved = proxy.resolved;
 
         if (!isNotBlank(proxy.name)) {
@@ -214,26 +237,27 @@ function produce(proxies, targetPlatform, type, opts = {}) {
                 delete proxy['tls-fingerprint'];
             }
         }
+
+        // 处理 端口跳跃
+        if (proxy.ports) {
+            proxy.ports = String(proxy.ports);
+            if (!['ClashMeta'].includes(targetPlatform)) {
+                proxy.ports = proxy.ports.replace(/\//g, ',');
+            }
+            if (!proxy.port) {
+                proxy.port = getRandomPort(proxy.ports);
+            }
+        }
+
         return proxy;
     });
 
     $.log(`Producing proxies for target: ${targetPlatform}`);
     if (typeof producer.type === 'undefined' || producer.type === 'SINGLE') {
-        let localPort = 10000;
         let list = proxies
             .map((proxy) => {
                 try {
-                    let line = producer.produce(proxy, type, opts);
-                    if (
-                        line.length > 0 &&
-                        line.includes('__SubStoreLocalPort__')
-                    ) {
-                        line = line.replace(
-                            /__SubStoreLocalPort__/g,
-                            localPort++,
-                        );
-                    }
-                    return line;
+                    return producer.produce(proxy, type, opts);
                 } catch (err) {
                     $.error(
                         `Cannot produce proxy: ${JSON.stringify(
@@ -252,7 +276,7 @@ function produce(proxies, targetPlatform, type, opts = {}) {
             proxies.length > 0 &&
             proxies.every((p) => p.type === 'wireguard')
         ) {
-            list = `#!name=${proxies[0]?.subName}
+            list = `#!name=${proxies[0]?._subName}
 #!desc=${proxies[0]?._desc ?? ''}
 #!category=${proxies[0]?._category ?? ''}
 ${list}`;
@@ -267,6 +291,8 @@ export const ProxyUtils = {
     parse,
     process: processFn,
     produce,
+    ipAddress,
+    getRandomPort,
     isIPv4,
     isIPv6,
     isIP,
@@ -276,6 +302,7 @@ export const ProxyUtils = {
     getISO,
     MMDB,
     Gist,
+    download,
 };
 
 function tryParse(parser, line) {
@@ -296,7 +323,26 @@ function safeMatch(parser, line) {
     }
 }
 
+function formatTransportPath(path) {
+    if (typeof path === 'string' || typeof path === 'number') {
+        path = String(path).trim();
+
+        if (path === '') {
+            return '/';
+        } else if (!path.startsWith('/')) {
+            return '/' + path;
+        }
+    }
+    return path;
+}
+
 function lastParse(proxy) {
+    if (typeof proxy.cipher === 'string') {
+        proxy.cipher = proxy.cipher.toLowerCase();
+    }
+    if (typeof proxy.password === 'number') {
+        proxy.password = numberToString(proxy.password);
+    }
     if (proxy.interface) {
         proxy['interface-name'] = proxy.interface;
         delete proxy.interface;
@@ -322,6 +368,17 @@ function lastParse(proxy) {
         }
         delete proxy['ws-path'];
         delete proxy['ws-headers'];
+    }
+
+    const transportPath = proxy[`${proxy.network}-opts`]?.path;
+
+    if (Array.isArray(transportPath)) {
+        proxy[`${proxy.network}-opts`].path = transportPath.map((item) =>
+            formatTransportPath(item),
+        );
+    } else if (transportPath != null) {
+        proxy[`${proxy.network}-opts`].path =
+            formatTransportPath(transportPath);
     }
 
     if (proxy.type === 'trojan') {
@@ -364,20 +421,7 @@ function lastParse(proxy) {
             proxy['h2-opts'].path = path[0];
         }
     }
-    if (proxy.tls && !proxy.sni) {
-        if (proxy.network) {
-            let transportHost = proxy[`${proxy.network}-opts`]?.headers?.Host;
-            transportHost = Array.isArray(transportHost)
-                ? transportHost[0]
-                : transportHost;
-            if (transportHost) {
-                proxy.sni = transportHost;
-            }
-        }
-        if (!proxy.sni && !isIP(proxy.server)) {
-            proxy.sni = proxy.server;
-        }
-    }
+
     // 非 tls, 有 ws/http 传输层, 使用域名的节点, 将设置传输层 Host 防止之后域名解析后丢失域名(不覆盖现有的 Host)
     if (
         !proxy.tls &&
@@ -404,8 +448,35 @@ function lastParse(proxy) {
             proxy[`${proxy.network}-opts`].path = [transportPath];
         }
     }
-    if (['hysteria', 'hysteria2'].includes(proxy.type) && !proxy.ports) {
+    if (proxy.tls && !proxy.sni) {
+        if (!isIP(proxy.server)) {
+            proxy.sni = proxy.server;
+        }
+        if (!proxy.sni && proxy.network) {
+            let transportHost = proxy[`${proxy.network}-opts`]?.headers?.Host;
+            transportHost = Array.isArray(transportHost)
+                ? transportHost[0]
+                : transportHost;
+            if (transportHost) {
+                proxy.sni = transportHost;
+            }
+        }
+    }
+    // if (['hysteria', 'hysteria2', 'tuic'].includes(proxy.type)) {
+    if (proxy.ports) {
+        proxy.ports = String(proxy.ports).replace(/\//g, ',');
+    } else {
         delete proxy.ports;
+    }
+    // }
+    if (
+        ['hysteria2'].includes(proxy.type) &&
+        proxy.obfs &&
+        !['salamander'].includes(proxy.obfs) &&
+        !proxy['obfs-password']
+    ) {
+        proxy['obfs-password'] = proxy.obfs;
+        proxy.obfs = 'salamander';
     }
     if (['vless'].includes(proxy.type)) {
         // 删除 reality-opts: {}

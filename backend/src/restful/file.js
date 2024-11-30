@@ -13,6 +13,8 @@ import { produceArtifact } from '@/restful/sync';
 export default function register($app) {
     if (!$.read(FILES_KEY)) $.write([], FILES_KEY);
 
+    $app.get('/share/file/:name', getFile);
+
     $app.route('/api/file/:name')
         .get(getFile)
         .patch(updateFile)
@@ -59,10 +61,33 @@ async function getFile(req, res) {
         content,
         mergeSources,
         ignoreFailedRemoteFile,
+        proxy,
     } = req.query;
+    let $options = {};
+    if (req.query.$options) {
+        try {
+            // 支持 `#${encodeURIComponent(JSON.stringify({arg1: "1"}))}`
+            $options = JSON.parse(decodeURIComponent(req.query.$options));
+        } catch (e) {
+            for (const pair of req.query.$options.split('&')) {
+                const key = pair.split('=')[0];
+                const value = pair.split('=')[1];
+                // 部分兼容之前的逻辑 const value = pair.split('=')[1] || true;
+                $options[key] =
+                    value == null || value === ''
+                        ? true
+                        : decodeURIComponent(value);
+            }
+        }
+        $.info(`传入 $options: ${JSON.stringify($options)}`);
+    }
     if (url) {
         url = decodeURIComponent(url);
         $.info(`指定远程文件 URL: ${url}`);
+    }
+    if (proxy) {
+        proxy = decodeURIComponent(proxy);
+        $.info(`指定远程订阅使用代理/策略 proxy: ${proxy}`);
     }
     if (ua) {
         ua = decodeURIComponent(ua);
@@ -101,6 +126,8 @@ async function getFile(req, res) {
                 content,
                 mergeSources,
                 ignoreFailedRemoteFile,
+                $options,
+                proxy,
             });
 
             try {
@@ -110,6 +137,8 @@ async function getFile(req, res) {
                     const flowInfo = await getFlowHeaders(
                         subInfoUrl,
                         subInfoUserAgent || file.subInfoUserAgent,
+                        undefined,
+                        proxy || file.proxy,
                     );
                     if (flowInfo) {
                         res.set('subscription-userinfo', flowInfo);
@@ -122,7 +151,14 @@ async function getFile(req, res) {
                     )}`,
                 );
             }
-
+            if (file.download) {
+                res.set(
+                    'Content-Disposition',
+                    `attachment; filename*=UTF-8''${encodeURIComponent(
+                        file.displayName || file.name,
+                    )}`,
+                );
+            }
             res.set('Content-Type', 'text/plain; charset=utf-8').send(
                 output ?? '',
             );
@@ -143,7 +179,7 @@ async function getFile(req, res) {
             );
         }
     } else {
-        $.notify(`🌍 Sub-Store 下载文件失败`, `❌ 未找到文件：${name}！`);
+        $.error(`🌍 Sub-Store 下载文件失败`, `❌ 未找到文件：${name}！`);
         failed(
             res,
             new ResourceNotFoundError(
